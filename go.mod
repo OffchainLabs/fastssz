@@ -1,4 +1,4 @@
-module github.com/prysmaticlabs/fastssz
+module github.com/OffchainLabs/fastssz
 
 go 1.18
 
