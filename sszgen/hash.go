@@ -183,6 +183,21 @@ func (v *Value) hashTreeRoot(name string, appendBytes bool) string {
 		return fmt.Sprintf("hh.PutBool(%s)", name)
 
 	case TypeVector:
+		if v.e.t == TypeContainer {
+			// Handle vectors of composite types
+			tmpl := `{
+				subIndx := hh.Index()
+				for _, elem := range {{.name}} {
+					if err = elem.HashTreeRootWith(hh); err != nil {
+						return
+					}
+				}
+				hh.Merkleize(subIndx)
+			}`
+			return execTmpl(tmpl, map[string]interface{}{
+				"name": name,
+			})
+		}
 		return v.hashRoots(false, v.e.t)
 
 	case TypeList:
