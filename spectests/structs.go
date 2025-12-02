@@ -1,8 +1,8 @@
 package spectests
 
 import (
-	"github.com/prysmaticlabs/fastssz/spectests/external"
-	"github.com/prysmaticlabs/fastssz/spectests/external2"
+	"github.com/OffchainLabs/fastssz/spectests/external"
+	"github.com/OffchainLabs/fastssz/spectests/external2"
 )
 
 type AggregateAndProof struct {
