@@ -58,7 +58,7 @@ func init() {
 }
 
 // HashWithDefaultHasher hashes a HashRoot object with a Hasher from
-// the default HasherPool
+// the default HasherPool.
 func HashWithDefaultHasher(v HashRoot) ([32]byte, error) {
 	hh := DefaultHasherPool.Get()
 	if err := v.HashTreeRootWith(hh); err != nil {
@@ -98,7 +98,7 @@ func NewHasher() *Hasher {
 	}
 }
 
-// NewHasher creates a new Hasher object with a custom hash function
+// NewHasherWithHash creates a new Hasher object with a custom hash function.
 func NewHasherWithHash(hh hash.Hash) *Hasher {
 	return &Hasher{
 		hash: hh,
@@ -106,12 +106,13 @@ func NewHasherWithHash(hh hash.Hash) *Hasher {
 	}
 }
 
-// Reset resets the Hasher obj
+// Reset clears the buffered data so the hasher can be reused.
 func (h *Hasher) Reset() {
 	h.buf = h.buf[:0]
 	h.hash.Reset()
 }
 
+// AppendBytes32 appends bytes and pads them up to a full SSZ chunk.
 func (h *Hasher) AppendBytes32(b []byte) {
 	h.buf = append(h.buf, b...)
 	if rest := len(b) % 32; rest != 0 {
@@ -153,6 +154,7 @@ func (h *Hasher) PutUint8(i uint8) {
 	PutUint(h, i)
 }
 
+// CalculateLimit returns the number of 32-byte chunks needed for a list limit.
 func CalculateLimit(maxCapacity, numItems, size uint64) uint64 {
 	limit := (maxCapacity*size + 31) / 32
 	if limit != 0 {
@@ -164,6 +166,7 @@ func CalculateLimit(maxCapacity, numItems, size uint64) uint64 {
 	return numItems
 }
 
+// FillUpTo32 pads the buffered data so its length is aligned to 32 bytes.
 func (h *Hasher) FillUpTo32() {
 	// pad zero bytes to the left
 	if rest := len(h.buf) % 32; rest != 0 {
@@ -194,36 +197,37 @@ func (h *Hasher) AppendUint64(i uint64) {
 	AppendUint(h, i)
 }
 
+// Append appends raw bytes without SSZ chunk padding.
 func (h *Hasher) Append(i []byte) {
 	h.buf = append(h.buf, i...)
 }
 
-// PutRootVector appends an array of roots
-func (h *Hasher) PutRootVector(b [][]byte, maxCapacity ...uint64) error {
-	indx := h.Index()
-	for _, i := range b {
-		if len(i) != 32 {
-			return fmt.Errorf("bad root")
+// PutRootVector appends an array of roots.
+func (h *Hasher) PutRootVector(roots [][]byte, maxCapacity ...uint64) error {
+	index := h.Index()
+	for _, root := range roots {
+		if len(root) != 32 {
+			return ErrRootSizeInvalid
 		}
-		h.buf = append(h.buf, i...)
+		h.buf = append(h.buf, root...)
 	}
 
 	if len(maxCapacity) == 0 {
-		h.Merkleize(indx)
+		h.Merkleize(index)
 	} else {
-		numItems := uint64(len(b))
+		numItems := uint64(len(roots))
 		limit := CalculateLimit(maxCapacity[0], numItems, 32)
 
-		h.MerkleizeWithMixin(indx, numItems, limit)
+		h.MerkleizeWithMixin(index, numItems, limit)
 	}
 	return nil
 }
 
-// PutUint64Array appends an array of uint64
-func (h *Hasher) PutUint64Array(b []uint64, maxCapacity ...uint64) {
-	indx := h.Index()
-	for _, i := range b {
-		h.buf = MarshalUint(h.buf, i)
+// PutUint64Array appends an array of uint64.
+func (h *Hasher) PutUint64Array(values []uint64, maxCapacity ...uint64) {
+	index := h.Index()
+	for _, value := range values {
+		h.buf = MarshalUint(h.buf, value)
 	}
 
 	// pad zero bytes to the left
@@ -231,20 +235,21 @@ func (h *Hasher) PutUint64Array(b []uint64, maxCapacity ...uint64) {
 
 	if len(maxCapacity) == 0 {
 		// Array with fixed size
-		h.Merkleize(indx)
+		h.Merkleize(index)
 	} else {
-		numItems := uint64(len(b))
+		numItems := uint64(len(values))
 		limit := CalculateLimit(maxCapacity[0], numItems, 8)
 
-		h.MerkleizeWithMixin(indx, numItems, limit)
+		h.MerkleizeWithMixin(index, numItems, limit)
 	}
 }
 
-func parseBitlist(dst, buf []byte) ([]byte, uint64) {
-	msb := uint8(bits.Len8(buf[len(buf)-1])) - 1
-	size := uint64(8*(len(buf)-1) + int(msb))
+// parseBitlist removes the delimiter bit and returns the logical bit size.
+func parseBitlist(dst, bitlist []byte) ([]byte, uint64) {
+	msb := uint8(bits.Len8(bitlist[len(bitlist)-1])) - 1
+	size := uint64(8*(len(bitlist)-1) + int(msb))
 
-	dst = append(dst, buf...)
+	dst = append(dst, bitlist...)
 	dst[len(dst)-1] &^= uint8(1 << msb)
 
 	newLen := len(dst)
@@ -258,18 +263,18 @@ func parseBitlist(dst, buf []byte) ([]byte, uint64) {
 	return res, size
 }
 
-// PutBitlist appends a ssz bitlist
-func (h *Hasher) PutBitlist(bb []byte, maxSize uint64) {
+// PutBitlist appends an SSZ bitlist.
+func (h *Hasher) PutBitlist(bitlist []byte, maxSize uint64) {
 	var size uint64
-	h.tmp, size = parseBitlist(h.tmp[:0], bb)
+	h.tmp, size = parseBitlist(h.tmp[:0], bitlist)
 
 	// merkleize the content with mix in length
-	indx := h.Index()
+	index := h.Index()
 	h.AppendBytes32(h.tmp)
-	h.MerkleizeWithMixin(indx, size, (maxSize+255)/256)
+	h.MerkleizeWithMixin(index, size, (maxSize+255)/256)
 }
 
-// PutBool appends a boolean
+// PutBool appends a boolean.
 func (h *Hasher) PutBool(b bool) {
 	if b {
 		h.buf = append(h.buf, trueBytes...)
@@ -278,7 +283,7 @@ func (h *Hasher) PutBool(b bool) {
 	}
 }
 
-// PutBytes appends bytes
+// PutBytes appends bytes.
 func (h *Hasher) PutBytes(b []byte) {
 	if len(b) <= 32 {
 		h.AppendBytes32(b)
@@ -287,34 +292,48 @@ func (h *Hasher) PutBytes(b []byte) {
 
 	// if the bytes are longer than 32 we have to
 	// merkleize the content
-	indx := h.Index()
+	index := h.Index()
 	h.AppendBytes32(b)
-	h.Merkleize(indx)
+	h.Merkleize(index)
 }
 
-// Index marks the current buffer index
+// Index marks the current buffer index.
 func (h *Hasher) Index() int {
 	return len(h.buf)
 }
 
-// Merkleize is used to merkleize the last group of the hasher
-func (h *Hasher) Merkleize(indx int) {
-	h.buf = append(h.buf[:indx], merkleizeInput(h.buf[indx:], 0)...)
+// Merkleize replaces the buffered tail that starts at index with its Merkle root.
+func (h *Hasher) Merkleize(index int) {
+	input := h.buf[index:]
+	if root, ok := merkleizeInputInPlace(input, 0); ok {
+		// When the buffer already has one spare chunk of capacity we can hash
+		// directly inside it and avoid copying the subtree into scratch space.
+		copy(h.buf[index:index+32], root)
+		h.buf = h.buf[:index+32]
+		return
+	}
+
+	h.buf = append(h.buf[:index], h.merkleizeInput(input, 0)...)
 }
 
-// MerkleizeWithMixin is used to merkleize the last group of the hasher
-func (h *Hasher) MerkleizeWithMixin(indx int, num, limit uint64) {
-	input := merkleizeInput(h.buf[indx:], limit)
+// MerkleizeWithMixin merkleizes the buffered tail and mixes the logical length
+// into the final root. This is used for SSZ lists and bitlists.
+func (h *Hasher) MerkleizeWithMixin(index int, num, limit uint64) {
+	buf := h.buf[index:]
+	input, ok := merkleizeInputInPlace(buf, limit)
+	if !ok {
+		input = h.merkleizeInput(buf, limit)
+	}
 	// mixin with the size
 	sizemix := h.tmp[:32]
-	for indx := range sizemix {
-		sizemix[indx] = 0
+	for i := range sizemix {
+		sizemix[i] = 0
 	}
 	MarshalUint(sizemix[:0], num)
-	h.buf = append(h.buf[:indx], h.doHash(input, input, sizemix)...)
+	h.buf = append(h.buf[:index], h.doHash(input, input, sizemix)...)
 }
 
-// HashRoot creates the hash final hash root
+// HashRoot returns the final 32-byte root currently stored in the buffer.
 func (h *Hasher) HashRoot() (res [32]byte, err error) {
 	if len(h.buf) != 32 {
 		err = ErrRootSizeInvalid
@@ -344,6 +363,7 @@ func (hh *HasherPool) Put(h *Hasher) {
 	hh.pool.Put(h)
 }
 
+// nextPowerOfTwo rounds v up to the next power of two.
 func nextPowerOfTwo(v uint64) uint {
 	v--
 	v |= v >> 1
@@ -355,17 +375,7 @@ func nextPowerOfTwo(v uint64) uint {
 	return uint(v)
 }
 
-func getDepth(d uint64) uint8 {
-	if d == 0 {
-		return 0
-	}
-	if d == 1 {
-		return 1
-	}
-	i := nextPowerOfTwo(d)
-	return 64 - uint8(bits.LeadingZeros(i)) - 1
-}
-
+// doHash hashes two already-serialized 32-byte nodes into dst.
 func (h *Hasher) doHash(dst []byte, a []byte, b []byte) []byte {
 	h.hash.Write(a)
 	h.hash.Write(b)
@@ -374,51 +384,112 @@ func (h *Hasher) doHash(dst []byte, a []byte, b []byte) []byte {
 	return dst
 }
 
+// merkleizeInput hashes arbitrary input bytes by first chunking them into
+// 32-byte leaves and then building the Merkle tree in scratch space.
 func merkleizeInput(input []byte, limit uint64) []byte {
-	chunkCount := (len(input) + 31) / 32
-	chunks := make([][32]byte, chunkCount)
-	for i, j := 0, 0; j < chunkCount; i, j = i+32, j+1 {
-		if j == chunkCount-1 {
-			copy(chunks[j][:], input[i:])
-		} else {
-			copy(chunks[j][:], input[i:i+32])
-		}
-	}
-
-	var result [32]byte
-	if limit == 0 {
-		result = merkleizeVector(chunks, uint64(chunkCount))
-	} else {
-		result = merkleizeVector(chunks, limit)
-	}
-
-	return result[:]
+	return merkleizeInputInto(nil, input, limit)
 }
 
-// MerkleizeVector uses our optimized routine to hash a list of 32-byte
-// elements.
-func merkleizeVector(elements [][32]byte, length uint64) [32]byte {
-	dep := depth(length)
-	// Return zerohash at depth
-	if len(elements) == 0 {
-		return zeroHashesRaw[dep]
+// merkleizeInput hashes input bytes using the hasher's reusable scratch buffer.
+func (h *Hasher) merkleizeInput(input []byte, limit uint64) []byte {
+	h.merkleizeTmp = merkleizeInputInto(h.merkleizeTmp[:0], input, limit)
+	return h.merkleizeTmp
+}
+
+// merkleizeInputInto builds the Merkle tree inside dst. The extra chunk of
+// capacity allows odd layers to append one zero hash without reallocating.
+func merkleizeInputInto(dst []byte, input []byte, limit uint64) []byte {
+	chunkCount := (len(input) + 31) / 32
+	treeSize := uint64(chunkCount)
+	if limit != 0 {
+		treeSize = limit
 	}
-	for i := uint8(0); i < dep; i++ {
-		layerLen := len(elements)
-		oddNodeLength := layerLen%2 == 1
-		if oddNodeLength {
-			zerohash := zeroHashesRaw[i]
-			elements = append(elements, zerohash)
+	dep := depth(treeSize)
+
+	// Empty inputs hash to the precomputed zero hash for the requested depth.
+	if chunkCount == 0 {
+		if cap(dst) < 32 {
+			dst = make([]byte, 32)
+		} else {
+			dst = dst[:32]
 		}
-		outputLen := len(elements) / 2
-		// gohashtree concurrently overwrites elements
-		err := gohashtree.Hash(elements, elements)
-		if err != nil {
+		copy(dst, zeroHashesRaw[dep][:])
+		return dst
+	}
+
+	// Copy the chunks into a reusable byte buffer so hashing can happen in place.
+	paddedLen := chunkCount * 32
+	if cap(dst) < paddedLen+32 {
+		dst = make([]byte, paddedLen, paddedLen+32)
+	} else {
+		dst = dst[:paddedLen]
+	}
+	copy(dst, input)
+	for i := len(input); i < paddedLen; i++ {
+		dst[i] = 0
+	}
+
+	layerLen := chunkCount
+	for i := uint8(0); i < dep; i++ {
+		if layerLen%2 == 1 {
+			dst = append(dst[:layerLen*32], zeroHashesRaw[i][:]...)
+			layerLen++
+		} else {
+			dst = dst[:layerLen*32]
+		}
+
+		outputLen := (layerLen / 2) * 32
+		if err := gohashtree.HashByteSlice(dst[:outputLen], dst[:layerLen*32]); err != nil {
 			panic(err)
 		}
-		elements = elements[:outputLen]
+
+		layerLen /= 2
+		dst = dst[:outputLen]
 	}
-	return elements[0]
+	return dst[:32]
+}
+
+// merkleizeInputInPlace tries to reuse the caller's buffer as the Merkle tree
+// workspace. It returns false when the buffer shape does not support safe
+// in-place hashing.
+func merkleizeInputInPlace(input []byte, limit uint64) ([]byte, bool) {
+	chunkCount := len(input) / 32
+	if len(input)%32 != 0 {
+		return nil, false
+	}
+
+	treeSize := uint64(chunkCount)
+	if limit != 0 {
+		treeSize = limit
+	}
+	dep := depth(treeSize)
+
+	if chunkCount == 0 {
+		return zeroHashesRaw[dep][:], true
+	}
+
+	layer := input
+	layerLen := chunkCount
+	for i := uint8(0); i < dep; i++ {
+		if layerLen%2 == 1 {
+			if cap(layer) < layerLen*32+32 {
+				return nil, false
+			}
+			layer = append(layer[:layerLen*32], zeroHashesRaw[i][:]...)
+			layerLen++
+		} else {
+			layer = layer[:layerLen*32]
+		}
+
+		outputLen := (layerLen / 2) * 32
+		if err := gohashtree.HashByteSlice(layer[:outputLen], layer[:layerLen*32]); err != nil {
+			panic(err)
+		}
+
+		layerLen /= 2
+		layer = layer[:outputLen]
+	}
+	return layer[:32], true
 }
 
 // Depth retrieves the appropriate depth for the provided trie size.
