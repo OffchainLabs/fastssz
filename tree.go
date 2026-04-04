@@ -3,6 +3,9 @@ package ssz
 import (
 	"encoding/binary"
 	"errors"
+	"sync"
+
+	"github.com/minio/sha256-simd"
 )
 
 // Proof represents a merkle proof against a general index.
@@ -97,7 +100,7 @@ func NewNodeWithLR(left, right *Node) *Node {
 func TreeFromChunks(chunks [][]byte) (*Node, error) {
 	numLeaves := len(chunks)
 	if !isPowerOfTwo(numLeaves) {
-		return nil, errors.New("Number of leaves should be a power of 2")
+		return nil, errors.New("number of leaves should be a power of 2")
 	}
 
 	leaves := make([]*Node, numLeaves)
@@ -139,6 +142,8 @@ func TreeFromNodes(leaves []*Node) (*Node, error) {
 	return nodes[0], nil
 }
 
+// TreeFromNodesWithMixin builds a subtree, pads it up to the limit, and then
+// mixes in the logical item count as the right child.
 func TreeFromNodesWithMixin(leaves []*Node, num, limit int) (*Node, error) {
 	numLeaves := len(leaves)
 	if !isPowerOfTwo(limit) {
@@ -176,7 +181,7 @@ func (n *Node) Get(index int) (*Node, error) {
 			cur = cur.left
 		}
 		if cur == nil {
-			return nil, errors.New("Node not found in tree")
+			return nil, errors.New("node not found in tree")
 		}
 	}
 
@@ -186,10 +191,95 @@ func (n *Node) Get(index int) (*Node, error) {
 // Hash returns the hash of the subtree with the given Node as its root.
 // If root has no children, it returns root's value (not its hash).
 func (n *Node) Hash() []byte {
-	// TODO: handle special cases: empty root, one non-empty node
+	if n.left == nil && n.right == nil {
+		return n.value
+	}
+
+	return subtreeHash(n)
+}
+
+// Prove returns a list of sibling values and hashes needed
+// to compute the root hash for a given general index.
+func (n *Node) Prove(index int) (*Proof, error) {
+	pathLen := getPathLength(index)
+	proof := &Proof{
+		Index:  index,
+		Hashes: make([][]byte, pathLen),
+	}
+
+	cur := n
+	for i := pathLen - 1; i >= 0; i-- {
+		var siblingHash []byte
+		if isRight := getPosAtLevel(index, i); isRight {
+			siblingHash = subtreeHash(cur.left)
+			cur = cur.right
+		} else {
+			siblingHash = subtreeHash(cur.right)
+			cur = cur.left
+		}
+		if cur == nil {
+			return nil, errors.New("node not found in tree")
+		}
+
+		// Proof hashes are stored from leaf to root, so fill the slice backwards
+		// instead of repeatedly prepending new slices.
+		proof.Hashes[i] = siblingHash
+	}
+
+	proof.Leaf = cur.value
+
+	return proof, nil
+}
+
+// ProveMulti returns the leaves and sibling hashes needed to verify
+// multiple generalized indices against the same root.
+func (n *Node) ProveMulti(indices []int) (*Multiproof, error) {
+	requiredIndices := getRequiredIndices(indices)
+	targetIndices := make([]int, 0, len(indices)+len(requiredIndices))
+	targetIndices = append(targetIndices, indices...)
+	targetIndices = append(targetIndices, requiredIndices...)
+
+	targetNodes, err := collectNodes(n, targetIndices)
+	if err != nil {
+		return nil, err
+	}
+
+	proof := &Multiproof{
+		Indices: indices,
+		Leaves:  make([][]byte, len(indices)),
+		Hashes:  make([][]byte, len(requiredIndices)),
+	}
+
+	for i, gi := range indices {
+		node := targetNodes[gi]
+		proof.Leaves[i] = node.value
+	}
+
+	for i, gi := range requiredIndices {
+		cur := targetNodes[gi]
+		proof.Hashes[i] = subtreeHash(cur)
+	}
+
+	return proof, nil
+}
+
+// Large complete subtrees benefit from batched merkleization. Smaller trees
+// stay on the recursive path because the extra setup work is not worth it.
+const subtreeBatchHashThreshold = 64
+
+var subtreeBatchBufferPool sync.Pool
+
+// subtreeHash picks the fastest safe hashing strategy for a subtree.
+// Small or irregular subtrees use the normal recursive path. Large complete
+// subtrees made of 32-byte leaves use the batched fast path.
+func subtreeHash(n *Node) []byte {
+	if hashed, ok := hashNodeBatched(n); ok {
+		return hashed
+	}
 	return hashNode(n)
 }
 
+// hashNode recursively hashes a subtree using the generic path.
 func hashNode(n *Node) []byte {
 	// Leaf
 	if n.left == nil && n.right == nil {
@@ -199,59 +289,150 @@ func hashNode(n *Node) []byte {
 	if n.left == nil || n.right == nil {
 		panic("Tree incomplete")
 	}
-	return hashFn(append(hashNode(n.left), hashNode(n.right)...))
+
+	leftHash := hashNode(n.left)
+	rightHash := hashNode(n.right)
+	return hashPair(leftHash, rightHash)
 }
 
-// Prove returns a list of sibling values and hashes needed
-// to compute the root hash for a given general index.
-func (n *Node) Prove(index int) (*Proof, error) {
-	pathLen := getPathLength(index)
-	proof := &Proof{Index: index}
-	hashes := make([][]byte, 0, pathLen)
-
-	cur := n
-	for i := pathLen - 1; i >= 0; i-- {
-		var siblingHash []byte
-		if isRight := getPosAtLevel(index, i); isRight {
-			siblingHash = hashNode(cur.left)
-			cur = cur.right
-		} else {
-			siblingHash = hashNode(cur.right)
-			cur = cur.left
-		}
-		hashes = append([][]byte{siblingHash}, hashes...)
-		if cur == nil {
-			return nil, errors.New("Node not found in tree")
-		}
+// hashNodeBatched hashes complete 32-byte-leaf subtrees with the same
+// merkleization engine that the hasher uses. This avoids recursive hashing
+// work on large balanced subtrees.
+func hashNodeBatched(n *Node) ([]byte, bool) {
+	leafCount, ok := countFixed32Leaves(n)
+	if !ok || leafCount < subtreeBatchHashThreshold {
+		return nil, false
 	}
 
-	proof.Hashes = hashes
-	proof.Leaf = cur.value
+	bufferSize := leafCount * len(zeroBytes)
+	leaves := getSubtreeBatchBuffer(bufferSize)
+	fillFixed32Leaves(n, leaves, 0)
+	root, ok := merkleizeInputInPlace(leaves, 0)
+	if !ok {
+		root = merkleizeInput(leaves, 0)
+	}
 
-	return proof, nil
+	// Copy the root before the scratch buffer goes back into the pool.
+	hashed := cloneBytes(root)
+	putSubtreeBatchBuffer(leaves)
+	return hashed, true
 }
 
-func (n *Node) ProveMulti(indices []int) (*Multiproof, error) {
-	reqIndices := getRequiredIndices(indices)
-	proof := &Multiproof{Indices: indices, Leaves: make([][]byte, len(indices)), Hashes: make([][]byte, len(reqIndices))}
-
-	for i, gi := range indices {
-		node, err := n.Get(gi)
-		if err != nil {
-			return nil, err
-		}
-		proof.Leaves[i] = node.value
+// countFixed32Leaves returns the number of leaves in a subtree and whether
+// every leaf is exactly one 32-byte SSZ chunk.
+func countFixed32Leaves(n *Node) (int, bool) {
+	if n.left == nil && n.right == nil {
+		return 1, len(n.value) == len(zeroBytes)
+	}
+	if n.left == nil || n.right == nil {
+		panic("Tree incomplete")
 	}
 
-	for i, gi := range reqIndices {
-		cur, err := n.Get(gi)
-		if err != nil {
-			return nil, err
-		}
-		proof.Hashes[i] = hashNode(cur)
+	leftCount, leftOK := countFixed32Leaves(n.left)
+	rightCount, rightOK := countFixed32Leaves(n.right)
+	return leftCount + rightCount, leftOK && rightOK
+}
+
+// fillFixed32Leaves writes the subtree leaves from left to right into the
+// flat scratch buffer used by the batched hashing path.
+func fillFixed32Leaves(n *Node, leaves []byte, leafIndex int) int {
+	if n.left == nil && n.right == nil {
+		offset := leafIndex * len(zeroBytes)
+		copy(leaves[offset:offset+len(zeroBytes)], n.value)
+		return leafIndex + 1
 	}
 
-	return proof, nil
+	leafIndex = fillFixed32Leaves(n.left, leaves, leafIndex)
+	return fillFixed32Leaves(n.right, leaves, leafIndex)
+}
+
+// hashPair hashes two child digests into one parent digest.
+func hashPair(left, right []byte) []byte {
+	combinedLen := len(left) + len(right)
+	if combinedLen <= 64 {
+		var input [64]byte
+		copy(input[:], left)
+		copy(input[len(left):], right)
+		sum := sha256.Sum256(input[:combinedLen])
+		return sum[:]
+	}
+
+	data := make([]byte, combinedLen)
+	copy(data, left)
+	copy(data[len(left):], right)
+	return hashFn(data)
+}
+
+// cloneBytes returns an owned copy of a digest before scratch buffers are reused.
+func cloneBytes(src []byte) []byte {
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
+// getSubtreeBatchBuffer returns a scratch buffer with one extra chunk of
+// capacity so the in-place merkleizer can append a zero hash when a layer is odd.
+func getSubtreeBatchBuffer(size int) []byte {
+	if buf, ok := subtreeBatchBufferPool.Get().([]byte); ok && cap(buf) >= size+len(zeroBytes) {
+		return buf[:size]
+	}
+	return make([]byte, size, size+len(zeroBytes))
+}
+
+// putSubtreeBatchBuffer releases a scratch buffer back to the pool.
+func putSubtreeBatchBuffer(buf []byte) {
+	subtreeBatchBufferPool.Put(buf[:0])
+}
+
+// collectNodes walks only the branches needed to reach the requested
+// generalized indices. This is faster than calling Get for every target.
+func collectNodes(root *Node, indices []int) (map[int]*Node, error) {
+	if len(indices) == 0 {
+		return map[int]*Node{}, nil
+	}
+
+	targets := make(map[int]struct{}, len(indices))
+	pathNodes := make(map[int]struct{}, len(indices)*2)
+	for _, index := range indices {
+		targets[index] = struct{}{}
+		for current := index; current >= 1; current = getParent(current) {
+			pathNodes[current] = struct{}{}
+			if current == 1 {
+				break
+			}
+		}
+	}
+
+	collectedNodes := make(map[int]*Node, len(indices))
+	var walk func(node *Node, index int) error
+	walk = func(node *Node, index int) error {
+		if node == nil {
+			return errors.New("node not found in tree")
+		}
+		if _, ok := targets[index]; ok {
+			collectedNodes[index] = node
+		}
+
+		leftIndex := index << 1
+		if _, ok := pathNodes[leftIndex]; ok {
+			if err := walk(node.left, leftIndex); err != nil {
+				return err
+			}
+		}
+
+		rightIndex := leftIndex | 1
+		if _, ok := pathNodes[rightIndex]; ok {
+			if err := walk(node.right, rightIndex); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if err := walk(root, 1); err != nil {
+		return nil, err
+	}
+	return collectedNodes, nil
 }
 
 // LeafFromUint returns a leaf node from a uint8, uint16, uint32, or uint64 value.
