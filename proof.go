@@ -179,7 +179,6 @@ func getRequiredIndices(leafIndices []int) []int {
 	return requiredList
 }
 
-// hashFn hashes one byte slice with the repository's SHA-256 implementation.
 func hashFn(data []byte) []byte {
 	res := sha256.Sum256(data)
 	return res[:]
