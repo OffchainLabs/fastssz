@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"math"
+	"math/bits"
 	"sort"
 
 	"github.com/minio/sha256-simd"
@@ -16,22 +16,31 @@ func VerifyProof(root []byte, proof *Proof) (bool, error) {
 	if len(proof.Hashes) != getPathLength(proof.Index) {
 		return false, errors.New("invalid proof length")
 	}
-
-	node := proof.Leaf[:]
-	tmp := make([]byte, 64)
-	for i, h := range proof.Hashes {
-		if getPosAtLevel(proof.Index, i) {
-			copy(tmp[:32], h[:])
-			copy(tmp[32:], node[:])
-			node = hashFn(tmp)
-		} else {
-			copy(tmp[:32], node[:])
-			copy(tmp[32:], h[:])
-			node = hashFn(tmp)
-		}
+	if len(root) != len(zeroBytes) {
+		return false, ErrRootSizeInvalid
 	}
 
-	return bytes.Equal(root, node), nil
+	// Proof verification always hashes 32-byte chunks, so we keep the
+	// working buffers on the stack and reuse them for every level.
+	var node [32]byte
+	copy(node[:], proof.Leaf)
+	var tmp [64]byte
+	index := proof.Index
+	for _, h := range proof.Hashes {
+		if index&1 == 1 {
+			copy(tmp[:32], h)
+			copy(tmp[32:], node[:])
+		} else {
+			copy(tmp[:32], node[:])
+			copy(tmp[32:], h)
+		}
+		node = sha256.Sum256(tmp[:])
+		index >>= 1
+	}
+
+	var rootHash [32]byte
+	copy(rootHash[:], root)
+	return node == rootHash, nil
 }
 
 // VerifyMultiproof verifies a proof for multiple leaves against the given root.
@@ -40,63 +49,70 @@ func VerifyMultiproof(root []byte, proof [][]byte, leaves [][]byte, indices []in
 		return false, errors.New("number of leaves and indices mismatch")
 	}
 
-	reqIndices := getRequiredIndices(indices)
-	if len(reqIndices) != len(proof) {
-		return false, fmt.Errorf("number of proof hashes %d and required indices %d mismatch", len(proof), len(reqIndices))
+	requiredIndices := getRequiredIndices(indices)
+	if len(requiredIndices) != len(proof) {
+		return false, fmt.Errorf("number of proof hashes %d and required indices %d mismatch", len(proof), len(requiredIndices))
 	}
 
-	keys := make([]int, len(indices)+len(reqIndices))
-	nk := 0
-	// Create database of index -> value (hash)
-	// from inputs
-	db := make(map[int][]byte)
+	pendingIndices := make([]int, len(indices)+len(requiredIndices))
+	keyCount := 0
+	// Store all nodes in a fixed-size format so parent hashes can be built
+	// without allocating new byte slices on every merge.
+	hashesByIndex := make(map[int][32]byte, len(pendingIndices))
 	for i, leaf := range leaves {
-		db[indices[i]] = leaf
-		keys[nk] = indices[i]
-		nk++
+		var leafHash [32]byte
+		copy(leafHash[:], leaf)
+		hashesByIndex[indices[i]] = leafHash
+		pendingIndices[keyCount] = indices[i]
+		keyCount++
 	}
 	for i, h := range proof {
-		db[reqIndices[i]] = h
-		keys[nk] = reqIndices[i]
-		nk++
+		var proofHash [32]byte
+		copy(proofHash[:], h)
+		hashesByIndex[requiredIndices[i]] = proofHash
+		pendingIndices[keyCount] = requiredIndices[i]
+		keyCount++
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(keys)))
+	sort.Sort(sort.Reverse(sort.IntSlice(pendingIndices)))
 
-	pos := 0
-	tmp := make([]byte, 64)
-	for pos < len(keys) {
-		k := keys[pos]
+	position := 0
+	var tmp [64]byte
+	for position < len(pendingIndices) {
+		index := pendingIndices[position]
 		// Root has been reached
-		if k == 1 {
+		if index == 1 {
 			break
 		}
 
-		_, hasParent := db[getParent(k)]
+		_, hasParent := hashesByIndex[getParent(index)]
 		if hasParent {
-			pos++
+			position++
 			continue
 		}
 
-		left, hasLeft := db[(k|1)^1]
-		right, hasRight := db[k|1]
+		left, hasLeft := hashesByIndex[(index|1)^1]
+		right, hasRight := hashesByIndex[index|1]
 		if !hasRight || !hasLeft {
-			return false, fmt.Errorf("proof is missing required nodes, either %d or %d", (k|1)^1, k|1)
+			return false, fmt.Errorf("proof is missing required nodes, either %d or %d", (index|1)^1, index|1)
 		}
 
+		// The verifier rebuilds missing parents from the bottom up until the
+		// root hash appears in the temporary database.
 		copy(tmp[:32], left[:])
 		copy(tmp[32:], right[:])
-		db[getParent(k)] = hashFn(tmp)
-		keys = append(keys, getParent(k))
+		parent := getParent(index)
+		hashesByIndex[parent] = sha256.Sum256(tmp[:])
+		pendingIndices = append(pendingIndices, parent)
 
-		pos++
+		position++
 	}
 
-	res, ok := db[1]
+	res, ok := hashesByIndex[1]
 	if !ok {
 		return false, fmt.Errorf("root was not computed during proof verification")
 	}
 
-	return bytes.Equal(res, root), nil
+	return bytes.Equal(res[:], root), nil
 }
 
 // Returns the position (i.e. false for left, true for right)
@@ -109,7 +125,10 @@ func getPosAtLevel(index int, level int) bool {
 
 // Returns the length of the path to a node represented by its generalized index.
 func getPathLength(index int) int {
-	return int(math.Log2(float64(index)))
+	if index <= 1 {
+		return 0
+	}
+	return bits.Len(uint(index)) - 1
 }
 
 // Returns the generalized index for a node's sibling.
@@ -160,6 +179,7 @@ func getRequiredIndices(leafIndices []int) []int {
 	return requiredList
 }
 
+// hashFn hashes one byte slice with the repository's SHA-256 implementation.
 func hashFn(data []byte) []byte {
 	res := sha256.Sum256(data)
 	return res[:]
