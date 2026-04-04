@@ -58,7 +58,7 @@ func init() {
 }
 
 // HashWithDefaultHasher hashes a HashRoot object with a Hasher from
-// the default HasherPool.
+// the default HasherPool
 func HashWithDefaultHasher(v HashRoot) ([32]byte, error) {
 	hh := DefaultHasherPool.Get()
 	if err := v.HashTreeRootWith(hh); err != nil {
@@ -106,7 +106,7 @@ func NewHasherWithHash(hh hash.Hash) *Hasher {
 	}
 }
 
-// Reset clears the buffered data so the hasher can be reused.
+// Reset resets the Hasher obj
 func (h *Hasher) Reset() {
 	h.buf = h.buf[:0]
 	h.hash.Reset()
@@ -363,7 +363,6 @@ func (hh *HasherPool) Put(h *Hasher) {
 	hh.pool.Put(h)
 }
 
-// nextPowerOfTwo rounds v up to the next power of two.
 func nextPowerOfTwo(v uint64) uint {
 	v--
 	v |= v >> 1
