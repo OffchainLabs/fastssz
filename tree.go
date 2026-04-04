@@ -181,7 +181,7 @@ func (n *Node) Get(index int) (*Node, error) {
 			cur = cur.left
 		}
 		if cur == nil {
-			return nil, errors.New("node not found in tree")
+			return nil, errors.New("Node not found in tree")
 		}
 	}
 
