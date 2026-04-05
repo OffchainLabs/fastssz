@@ -33,12 +33,18 @@ func (p *Multiproof) Compress() *CompressedMultiproof {
 	}
 
 	for _, h := range p.Hashes {
-		if l, ok := zeroHashLevels[string(h)]; ok {
-			compressed.ZeroLevels = append(compressed.ZeroLevels, l)
-			compressed.Hashes = append(compressed.Hashes, nil)
-		} else {
-			compressed.Hashes = append(compressed.Hashes, h)
+		// Only exact 32-byte zero hashes are encoded as nil entries. Every other
+		// hash is preserved as-is so decompression can rebuild the original proof.
+		hashKey, ok := bytesToHashKey(h)
+		if ok {
+			if level, found := zeroHashLevels[hashKey]; found {
+				compressed.ZeroLevels = append(compressed.ZeroLevels, level)
+				compressed.Hashes = append(compressed.Hashes, nil)
+				continue
+			}
 		}
+
+		compressed.Hashes = append(compressed.Hashes, h)
 	}
 
 	return compressed
@@ -63,11 +69,11 @@ func (c *CompressedMultiproof) Decompress() *Multiproof {
 		Hashes:  make([][]byte, len(c.Hashes)),
 	}
 
-	zc := 0
+	zeroLevelIndex := 0
 	for i, h := range c.Hashes {
 		if h == nil {
-			p.Hashes[i] = zeroHashes[c.ZeroLevels[zc]][:]
-			zc++
+			p.Hashes[i] = zeroHashes[c.ZeroLevels[zeroLevelIndex]][:]
+			zeroLevelIndex++
 		} else {
 			p.Hashes[i] = c.Hashes[i]
 		}
@@ -99,6 +105,9 @@ func NewNodeWithLR(left, right *Node) *Node {
 // The number of leaves should be a power of 2.
 func TreeFromChunks(chunks [][]byte) (*Node, error) {
 	numLeaves := len(chunks)
+	if numLeaves == 0 {
+		return nil, errors.New("number of leaves should be greater than 0")
+	}
 	if !isPowerOfTwo(numLeaves) {
 		return nil, errors.New("number of leaves should be a power of 2")
 	}
@@ -115,6 +124,9 @@ func TreeFromChunks(chunks [][]byte) (*Node, error) {
 // The number of leaves should be a power of 2.
 func TreeFromNodes(leaves []*Node) (*Node, error) {
 	numLeaves := len(leaves)
+	if numLeaves == 0 {
+		return nil, errors.New("number of leaves should be greater than 0")
+	}
 
 	if numLeaves == 1 {
 		return leaves[0], nil
@@ -146,8 +158,14 @@ func TreeFromNodes(leaves []*Node) (*Node, error) {
 // mixes in the logical item count as the right child.
 func TreeFromNodesWithMixin(leaves []*Node, num, limit int) (*Node, error) {
 	numLeaves := len(leaves)
+	if limit <= 0 {
+		return nil, errors.New("size of tree should be greater than 0")
+	}
 	if !isPowerOfTwo(limit) {
 		return nil, errors.New("size of tree should be a power of 2")
+	}
+	if numLeaves > limit {
+		return nil, errors.New("number of leaves exceeds tree limit")
 	}
 
 	allLeaves := make([]*Node, limit)
@@ -368,6 +386,18 @@ func cloneBytes(src []byte) []byte {
 	dst := make([]byte, len(src))
 	copy(dst, src)
 	return dst
+}
+
+func bytesToHashKey(src []byte) ([32]byte, bool) {
+	if len(src) != len(zeroBytes) {
+		return [32]byte{}, false
+	}
+
+	// A fixed-size array key is cheaper than converting the hash into a string
+	// every time compression checks for a precomputed zero hash.
+	var key [32]byte
+	copy(key[:], src)
+	return key, true
 }
 
 // getSubtreeBatchBuffer returns a scratch buffer with one extra chunk of
