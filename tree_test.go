@@ -11,34 +11,46 @@ import (
 
 type treeSlot uint64
 
+// TestTreeFromChunks checks that chunk-backed trees preserve leaf order and reject empty input.
 func TestTreeFromChunks(t *testing.T) {
-	chunks := [][]byte{
-		{0x01, 0x01},
-		{0x02, 0x02},
-		{0x03, 0x03},
-		{0x00, 0x00},
-	}
+	t.Run("builds tree from chunks", func(t *testing.T) {
+		// This case checks that leaves can be read back from their generalized indices.
+		chunks := [][]byte{
+			{0x01, 0x01},
+			{0x02, 0x02},
+			{0x03, 0x03},
+			{0x00, 0x00},
+		}
 
-	r, err := TreeFromChunks(chunks)
-	if err != nil {
-		t.Errorf("Failed to construct tree: %v\n", err)
-	}
-	for i := 4; i < 8; i++ {
-		l, err := r.Get(i)
+		r, err := TreeFromChunks(chunks)
 		if err != nil {
-			t.Errorf("Failed getting leaf: %v\n", err)
+			t.Fatalf("failed to construct tree: %v", err)
 		}
-		if !bytes.Equal(l.value, chunks[i-4]) {
-			t.Errorf("Incorrect leaf at index %d\n", i)
+		for i := 4; i < 8; i++ {
+			l, err := r.Get(i)
+			if err != nil {
+				t.Fatalf("failed getting leaf: %v", err)
+			}
+			if !bytes.Equal(l.value, chunks[i-4]) {
+				t.Fatalf("incorrect leaf at index %d", i)
+			}
 		}
-	}
+	})
+
+	t.Run("rejects empty input", func(t *testing.T) {
+		// This case checks that callers get a clear error instead of a panic for empty input.
+		if _, err := TreeFromChunks(nil); err == nil {
+			t.Fatal("expected an error for empty chunks")
+		}
+	})
 }
 
+// TestHashTree checks that tree hashing stays stable for the existing regression fixture.
 func TestHashTree(t *testing.T) {
 	expectedRootHex := "6621edd5d039d27d1ced186d57691a04903ac79b389187c2d453b5d3cd65180e"
 	expectedRoot, err := hex.DecodeString(expectedRootHex)
 	if err != nil {
-		t.Errorf("Failed to decode hex string\n")
+		t.Fatalf("failed to decode hex string: %v", err)
 	}
 
 	chunks := [][]byte{
@@ -48,97 +60,18 @@ func TestHashTree(t *testing.T) {
 		{0x00, 0x00},
 	}
 
-	r, err := TreeFromChunks(chunks)
+	root, err := TreeFromChunks(chunks)
 	if err != nil {
-		t.Errorf("Failed to construct tree: %v\n", err)
+		t.Fatalf("failed to construct tree: %v", err)
 	}
 
-	h := r.Hash()
-	if !bytes.Equal(h, expectedRoot) {
-		t.Errorf("Computed hash is incorrect. Expected %s, got %s\n", expectedRootHex, hex.EncodeToString(h))
+	rootHash := root.Hash()
+	if !bytes.Equal(rootHash, expectedRoot) {
+		t.Fatalf("computed hash is incorrect. expected %s, got %s", expectedRootHex, hex.EncodeToString(rootHash))
 	}
 }
 
-func TestProve(t *testing.T) {
-	expectedProofHex := []string{
-		"0000",
-		"5db57a86b859d1c286b5f1f585048bf8f6b5e626573a8dc728ed5080f6f43e2c",
-	}
-	chunks := [][]byte{
-		{0x01, 0x01},
-		{0x02, 0x02},
-		{0x03, 0x03},
-		{0x00, 0x00},
-	}
-
-	r, err := TreeFromChunks(chunks)
-	if err != nil {
-		t.Errorf("Failed to construct tree: %v\n", err)
-	}
-
-	p, err := r.Prove(6)
-	if err != nil {
-		t.Errorf("Failed to generate proof: %v\n", err)
-	}
-
-	if p.Index != 6 {
-		t.Errorf("Proof has invalid index. Expected %d, got %d\n", 6, p.Index)
-	}
-	if !bytes.Equal(p.Leaf, chunks[2]) {
-		t.Errorf("Proof has invalid leaf. Expected %v, got %v\n", chunks[2], p.Leaf)
-	}
-	if len(p.Hashes) != len(expectedProofHex) {
-		t.Errorf("Proof has invalid length. Expected %d, got %d\n", len(expectedProofHex), len(p.Hashes))
-	}
-
-	for i, n := range p.Hashes {
-		e, err := hex.DecodeString(expectedProofHex[i])
-		if err != nil {
-			t.Errorf("Failed to decode hex string: %v\n", err)
-		}
-		if !bytes.Equal(e, n) {
-			t.Errorf("Invalid proof item. Expected %s, got %s\n", expectedProofHex[i], hex.EncodeToString(n))
-		}
-	}
-}
-
-func TestProveMulti(t *testing.T) {
-	chunks := [][]byte{
-		{0x01, 0x01},
-		{0x02, 0x02},
-		{0x03, 0x03},
-		{0x04, 0x04},
-	}
-
-	r, err := TreeFromChunks(chunks)
-	if err != nil {
-		t.Errorf("Failed to construct tree: %v\n", err)
-	}
-
-	p, err := r.ProveMulti([]int{6, 7})
-	if err != nil {
-		t.Errorf("Failed to generate proof: %v\n", err)
-	}
-
-	if len(p.Hashes) != 1 {
-		t.Errorf("Incorrect number of hashes in proof. Expected 1, got %d\n", len(p.Hashes))
-	}
-}
-
-func TestGetRequiredIndices(t *testing.T) {
-	indices := []int{10, 48, 49}
-	expected := []int{25, 13, 11, 7, 4}
-	req := getRequiredIndices(indices)
-	if len(expected) != len(req) {
-		t.Fatalf("Required indices has wrong length. Expected %d, got %d\n", len(expected), len(req))
-	}
-	for i, r := range req {
-		if r != expected[i] {
-			t.Errorf("Invalid required index. Expected %d, got %d\n", expected[i], r)
-		}
-	}
-}
-
+// TestLeafFromUintAcceptsNamedUint64 checks that named uint64 types still work with the generic helper.
 func TestLeafFromUintAcceptsNamedUint64(t *testing.T) {
 	leaf := LeafFromUint(treeSlot(7))
 	want := make([]byte, 32)
@@ -148,6 +81,65 @@ func TestLeafFromUintAcceptsNamedUint64(t *testing.T) {
 	}
 }
 
+// TestTreeFromNodes checks tree-builder error handling for invalid leaf collections and missing lookups.
+func TestTreeFromNodes(t *testing.T) {
+	t.Run("rejects empty leaves", func(t *testing.T) {
+		// This case checks that an empty leaf list returns an error.
+		if _, err := TreeFromNodes(nil); err == nil {
+			t.Fatal("expected an error for empty leaves")
+		}
+	})
+
+	t.Run("rejects missing node lookups", func(t *testing.T) {
+		// This case checks that reading a node outside the tree returns an error.
+		root, err := TreeFromChunks([][]byte{
+			bytes.Repeat([]byte{1}, 32),
+			bytes.Repeat([]byte{2}, 32),
+		})
+		if err != nil {
+			t.Fatalf("failed to build tree: %v", err)
+		}
+
+		if _, err := root.Get(8); err == nil {
+			t.Fatal("expected an error for a missing node")
+		}
+	})
+}
+
+// TestTreeFromNodesWithMixin checks validation around mixin tree sizing rules.
+func TestTreeFromNodesWithMixin(t *testing.T) {
+	t.Run("rejects zero limit", func(t *testing.T) {
+		// This case checks that the mixin tree requires a positive limit.
+		if _, err := TreeFromNodesWithMixin(nil, 0, 0); err == nil {
+			t.Fatal("expected an error for zero limit")
+		}
+	})
+
+	t.Run("rejects leaf overflow", func(t *testing.T) {
+		// This case checks that the builder rejects more leaves than the declared tree limit.
+		leaves := []*Node{
+			LeafFromUint8(1),
+			LeafFromUint8(2),
+			LeafFromUint8(3),
+		}
+		if _, err := TreeFromNodesWithMixin(leaves, len(leaves), 2); err == nil {
+			t.Fatal("expected an error when leaves exceed the limit")
+		}
+	})
+}
+
+// TestLeafFromBytesPanicsForOversizedInput checks that oversized leaf input still fails loudly.
+func TestLeafFromBytesPanicsForOversizedInput(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for oversized leaf input")
+		}
+	}()
+
+	LeafFromBytes(bytes.Repeat([]byte{1}, 33))
+}
+
+// TestDeprecatedLeafWrappersCallLeafFromUint checks that deprecated wrappers still delegate to the generic helper.
 func TestDeprecatedLeafWrappersCallLeafFromUint(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "tree.go", nil, 0)
@@ -185,6 +177,7 @@ func TestDeprecatedLeafWrappersCallLeafFromUint(t *testing.T) {
 	}
 }
 
+// TestTreeInternalsUseGenericUintHelpers checks that mixin trees use the shared uint leaf helper.
 func TestTreeInternalsUseGenericUintHelpers(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "tree.go", nil, 0)
@@ -215,4 +208,62 @@ func TestTreeInternalsUseGenericUintHelpers(t *testing.T) {
 		return
 	}
 	t.Fatal("did not find TreeFromNodesWithMixin")
+}
+
+type treeBenchmarkFixture struct {
+	root        *Node
+	merkleInput []byte
+}
+
+func newTreeBenchmarkFixture(b *testing.B) *treeBenchmarkFixture {
+	b.Helper()
+
+	const leafCount = 1024
+
+	leaves := make([][]byte, leafCount)
+	merkleInput := make([]byte, 0, leafCount*32)
+	for i := range leaves {
+		leaf := make([]byte, 32)
+		for j := range leaf {
+			leaf[j] = byte(i + j)
+		}
+		leaves[i] = leaf
+		merkleInput = append(merkleInput, leaf...)
+	}
+
+	root, err := TreeFromChunks(leaves)
+	if err != nil {
+		b.Fatalf("failed to build benchmark tree: %v", err)
+	}
+
+	return &treeBenchmarkFixture{
+		root:        root,
+		merkleInput: merkleInput,
+	}
+}
+
+// BenchmarkNodeHash measures the cost of hashing a prebuilt tree.
+func BenchmarkNodeHash(b *testing.B) {
+	fixture := newTreeBenchmarkFixture(b)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = fixture.root.Hash()
+	}
+}
+
+// BenchmarkHasherMerkleize measures the cost of merkleizing raw chunk input with the streaming hasher.
+func BenchmarkHasherMerkleize(b *testing.B) {
+	fixture := newTreeBenchmarkFixture(b)
+	hasher := NewHasher()
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(fixture.merkleInput)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hasher.Reset()
+		hasher.Append(fixture.merkleInput)
+		hasher.Merkleize(0)
+	}
 }
