@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/bits"
 	"sort"
+	"sync"
 
 	"github.com/minio/sha256-simd"
 )
@@ -48,30 +49,35 @@ func VerifyMultiproof(root []byte, proof [][]byte, leaves [][]byte, indices []in
 	if len(leaves) != len(indices) {
 		return false, errors.New("number of leaves and indices mismatch")
 	}
+	// When the caller already supplied every leaf of a complete tree, verifying
+	// the proof is just a direct merkleization step and does not need the
+	// generic map-based parent reconstruction below.
+	if ok, valid := verifyFullTreeLeaves(root, proof, leaves, indices); ok {
+		return valid, nil
+	}
 
 	requiredIndices := getRequiredIndices(indices)
 	if len(requiredIndices) != len(proof) {
 		return false, fmt.Errorf("number of proof hashes %d and required indices %d mismatch", len(proof), len(requiredIndices))
 	}
 
-	pendingIndices := make([]int, len(indices)+len(requiredIndices))
-	keyCount := 0
+	// The work queue grows as parent nodes are rebuilt, so reserve capacity for
+	// both the input nodes and the parent indices appended during the walk.
+	pendingIndices := make([]int, 0, 2*(len(indices)+len(requiredIndices)))
 	// Store all nodes in a fixed-size format so parent hashes can be built
 	// without allocating new byte slices on every merge.
-	hashesByIndex := make(map[int][32]byte, len(pendingIndices))
+	hashesByIndex := make(map[int][32]byte, len(indices)+len(requiredIndices))
 	for i, leaf := range leaves {
 		var leafHash [32]byte
 		copy(leafHash[:], leaf)
 		hashesByIndex[indices[i]] = leafHash
-		pendingIndices[keyCount] = indices[i]
-		keyCount++
+		pendingIndices = append(pendingIndices, indices[i])
 	}
 	for i, h := range proof {
 		var proofHash [32]byte
 		copy(proofHash[:], h)
 		hashesByIndex[requiredIndices[i]] = proofHash
-		pendingIndices[keyCount] = requiredIndices[i]
-		keyCount++
+		pendingIndices = append(pendingIndices, requiredIndices[i])
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(pendingIndices)))
 
@@ -115,6 +121,62 @@ func VerifyMultiproof(root []byte, proof [][]byte, leaves [][]byte, indices []in
 	return bytes.Equal(res[:], root), nil
 }
 
+var fullTreeLeafBufferPool sync.Pool
+
+// verifyFullTreeLeaves fast-paths verification when the caller already
+// supplied every leaf of a complete tree in left-to-right order.
+func verifyFullTreeLeaves(root []byte, proof [][]byte, leaves [][]byte, indices []int) (bool, bool) {
+	leafCount := len(leaves)
+	if len(proof) != 0 || leafCount == 0 || leafCount != len(indices) || !isPowerOfTwo(leafCount) {
+		return false, false
+	}
+	if !isFullTreeLeafRange(indices, leafCount) {
+		return false, false
+	}
+
+	bufferSize := leafCount * len(zeroBytes)
+	leafBuffer := getFullTreeLeafBuffer(bufferSize)
+	for i, leaf := range leaves {
+		// Leaves may be shorter than one SSZ chunk, so normalize them into
+		// 32-byte chunks before hashing the whole tree in one pass.
+		chunk := leafBuffer[i*len(zeroBytes) : (i+1)*len(zeroBytes)]
+		copied := copy(chunk, leaf)
+		for j := copied; j < len(chunk); j++ {
+			chunk[j] = 0
+		}
+	}
+
+	computedRoot, ok := merkleizeInputInPlace(leafBuffer, 0)
+	if !ok {
+		computedRoot = merkleizeInput(leafBuffer, 0)
+	}
+	valid := bytes.Equal(computedRoot, root)
+	putFullTreeLeafBuffer(leafBuffer)
+	return true, valid
+}
+
+func isFullTreeLeafRange(indices []int, leafCount int) bool {
+	// The fast path is only correct for the canonical complete-tree leaf range:
+	// leafCount, leafCount+1, ... leafCount+n-1.
+	for i, index := range indices {
+		if index != leafCount+i {
+			return false
+		}
+	}
+	return true
+}
+
+func getFullTreeLeafBuffer(size int) []byte {
+	if buf, ok := fullTreeLeafBufferPool.Get().([]byte); ok && cap(buf) >= size+len(zeroBytes) {
+		return buf[:size]
+	}
+	return make([]byte, size, size+len(zeroBytes))
+}
+
+func putFullTreeLeafBuffer(buf []byte) {
+	fullTreeLeafBufferPool.Put(buf[:0])
+}
+
 // Returns the position (i.e. false for left, true for right)
 // of an index at a given level.
 // Level 0 is the actual index's level, Level 1 is the position
@@ -145,13 +207,17 @@ func getParent(index int) int {
 // required to prove the given leaf indices. The returned indices
 // are in a decreasing order.
 func getRequiredIndices(leafIndices []int) []int {
+	if len(leafIndices) == 0 {
+		return nil
+	}
+
 	exists := struct{}{}
 	// Sibling hashes needed for verification
-	required := make(map[int]struct{})
+	required := make(map[int]struct{}, len(leafIndices))
 	// Set of hashes that will be computed
 	// on the path from leaf to root.
-	computed := make(map[int]struct{})
-	leaves := make(map[int]struct{})
+	computed := make(map[int]struct{}, len(leafIndices))
+	leaves := make(map[int]struct{}, len(leafIndices))
 
 	for _, leaf := range leafIndices {
 		leaves[leaf] = exists
