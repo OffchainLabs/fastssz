@@ -20,7 +20,10 @@ var (
 )
 
 var zeroHashes [65][32]byte
-var zeroHashLevels map[string]int
+
+// zeroHashLevels lets proof compression detect precomputed zero hashes without
+// allocating temporary strings for lookup keys.
+var zeroHashLevels map[[32]byte]int
 var trueBytes, falseBytes []byte
 
 const (
@@ -45,15 +48,15 @@ func init() {
 	falseBytes = make([]byte, 32)
 	trueBytes = make([]byte, 32)
 	trueBytes[0] = 1
-	zeroHashLevels = make(map[string]int)
-	zeroHashLevels[string(falseBytes)] = 0
+	zeroHashLevels = make(map[[32]byte]int)
+	zeroHashLevels[zeroHashes[0]] = 0
 
 	tmp := [64]byte{}
 	for i := 0; i < 64; i++ {
 		copy(tmp[:32], zeroHashes[i][:])
 		copy(tmp[32:], zeroHashes[i][:])
 		zeroHashes[i+1] = sha256.Sum256(tmp[:])
-		zeroHashLevels[string(zeroHashes[i+1][:])] = i + 1
+		zeroHashLevels[zeroHashes[i+1]] = i + 1
 	}
 }
 
