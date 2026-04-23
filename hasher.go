@@ -307,26 +307,13 @@ func (h *Hasher) Index() int {
 
 // Merkleize replaces the buffered tail that starts at index with its Merkle root.
 func (h *Hasher) Merkleize(index int) {
-	input := h.buf[index:]
-	if root, ok := merkleizeInputInPlace(input, 0); ok {
-		// When the buffer already has one spare chunk of capacity we can hash
-		// directly inside it and avoid copying the subtree into scratch space.
-		copy(h.buf[index:index+32], root)
-		h.buf = h.buf[:index+32]
-		return
-	}
-
-	h.buf = append(h.buf[:index], h.merkleizeInput(input, 0)...)
+	h.buf = append(h.buf[:index], h.merkleizeInput(h.buf[index:], 0)...)
 }
 
 // MerkleizeWithMixin merkleizes the buffered tail and mixes the logical length
 // into the final root. This is used for SSZ lists and bitlists.
 func (h *Hasher) MerkleizeWithMixin(index int, num, limit uint64) {
-	buf := h.buf[index:]
-	input, ok := merkleizeInputInPlace(buf, limit)
-	if !ok {
-		input = h.merkleizeInput(buf, limit)
-	}
+	input := h.merkleizeInput(h.buf[index:], limit)
 	// mixin with the size
 	sizemix := h.tmp[:32]
 	for i := range sizemix {
