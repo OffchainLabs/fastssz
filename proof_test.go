@@ -99,101 +99,6 @@ func TestProve(t *testing.T) {
 	}
 }
 
-// benchFixture holds prebuilt trees and proofs shared across all benchmarks.
-type benchFixture struct {
-	// Tree (1024 leaves)
-	treeRoot    *Node
-	merkleInput []byte
-
-	// Proof tree (4096 leaves)
-	proofRoot         *Node
-	proofRootHash     []byte
-	singleProof       *Proof
-	multiProof        *Multiproof
-	adjacentProof     *Multiproof
-	fullTreeLeafProof *Multiproof
-}
-
-func newBenchFixture(b *testing.B) *benchFixture {
-	b.Helper()
-
-	// ---------- tree (1024 leaves) ----------
-	const treeLeafCount = 1024
-	treeLeaves := make([][]byte, treeLeafCount)
-	merkleInput := make([]byte, 0, treeLeafCount*32)
-	for i := range treeLeaves {
-		leaf := make([]byte, 32)
-		for j := range leaf {
-			leaf[j] = byte(i + j)
-		}
-		treeLeaves[i] = leaf
-		merkleInput = append(merkleInput, leaf...)
-	}
-	treeRoot, err := TreeFromChunks(treeLeaves)
-	if err != nil {
-		b.Fatalf("tree build: %v", err)
-	}
-
-	// ---------- proof tree (4096 leaves) ----------
-	const proofLeafCount = 4096
-	proofLeaves := make([][]byte, proofLeafCount)
-	for i := range proofLeaves {
-		leaf := make([]byte, 32)
-		for j := range leaf {
-			leaf[j] = byte(i + j)
-		}
-		proofLeaves[i] = leaf
-	}
-	proofRoot, err := TreeFromChunks(proofLeaves)
-	if err != nil {
-		b.Fatalf("proof tree build: %v", err)
-	}
-
-	singleProof, err := proofRoot.Prove(proofLeafCount + 513)
-	if err != nil {
-		b.Fatalf("single proof: %v", err)
-	}
-	multiProof, err := proofRoot.ProveMulti([]int{proofLeafCount + 513, proofLeafCount + 514})
-	if err != nil {
-		b.Fatalf("multi proof: %v", err)
-	}
-	adjacentProof, err := proofRoot.ProveMulti([]int{proofLeafCount + 256, proofLeafCount + 257})
-	if err != nil {
-		b.Fatalf("adjacent proof: %v", err)
-	}
-
-	fullIdx := make([]int, proofLeafCount)
-	for i := range fullIdx {
-		fullIdx[i] = proofLeafCount + i
-	}
-	fullTreeLeafProof, err := proofRoot.ProveMulti(fullIdx)
-	if err != nil {
-		b.Fatalf("full tree proof: %v", err)
-	}
-
-	return &benchFixture{
-		treeRoot:          treeRoot,
-		merkleInput:       merkleInput,
-		proofRoot:         proofRoot,
-		proofRootHash:     proofRoot.Hash(),
-		singleProof:       singleProof,
-		multiProof:        multiProof,
-		adjacentProof:     adjacentProof,
-		fullTreeLeafProof: fullTreeLeafProof,
-	}
-}
-
-func BenchmarkNodeProve(b *testing.B) {
-	f := newBenchFixture(b)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := f.proofRoot.Prove(f.singleProof.Index); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
 // TestProveMulti checks that a generated multiproof includes only the hashes that are still required.
 func TestProveMulti(t *testing.T) {
 	chunks := [][]byte{
@@ -521,6 +426,102 @@ func TestMultiproofCompressionRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// benchFixture holds prebuilt trees and proofs shared across all benchmarks.
+type benchFixture struct {
+	// Tree (1024 leaves)
+	treeRoot    *Node
+	merkleInput []byte
+
+	// Proof tree (4096 leaves)
+	proofRoot         *Node
+	proofRootHash     []byte
+	singleProof       *Proof
+	multiProof        *Multiproof
+	adjacentProof     *Multiproof
+	fullTreeLeafProof *Multiproof
+}
+
+func newBenchFixture(b *testing.B) *benchFixture {
+	b.Helper()
+
+	// ---------- tree (1024 leaves) ----------
+	const treeLeafCount = 1024
+	treeLeaves := make([][]byte, treeLeafCount)
+	merkleInput := make([]byte, 0, treeLeafCount*32)
+	for i := range treeLeaves {
+		leaf := make([]byte, 32)
+		for j := range leaf {
+			leaf[j] = byte(i + j)
+		}
+		treeLeaves[i] = leaf
+		merkleInput = append(merkleInput, leaf...)
+	}
+	treeRoot, err := TreeFromChunks(treeLeaves)
+	if err != nil {
+		b.Fatalf("tree build: %v", err)
+	}
+
+	// ---------- proof tree (4096 leaves) ----------
+	const proofLeafCount = 4096
+	proofLeaves := make([][]byte, proofLeafCount)
+	for i := range proofLeaves {
+		leaf := make([]byte, 32)
+		for j := range leaf {
+			leaf[j] = byte(i + j)
+		}
+		proofLeaves[i] = leaf
+	}
+	proofRoot, err := TreeFromChunks(proofLeaves)
+	if err != nil {
+		b.Fatalf("proof tree build: %v", err)
+	}
+
+	singleProof, err := proofRoot.Prove(proofLeafCount + 513)
+	if err != nil {
+		b.Fatalf("single proof: %v", err)
+	}
+	multiProof, err := proofRoot.ProveMulti([]int{proofLeafCount + 513, proofLeafCount + 514})
+	if err != nil {
+		b.Fatalf("multi proof: %v", err)
+	}
+	adjacentProof, err := proofRoot.ProveMulti([]int{proofLeafCount + 256, proofLeafCount + 257})
+	if err != nil {
+		b.Fatalf("adjacent proof: %v", err)
+	}
+
+	fullIdx := make([]int, proofLeafCount)
+	for i := range fullIdx {
+		fullIdx[i] = proofLeafCount + i
+	}
+	fullTreeLeafProof, err := proofRoot.ProveMulti(fullIdx)
+	if err != nil {
+		b.Fatalf("full tree proof: %v", err)
+	}
+
+	return &benchFixture{
+		treeRoot:          treeRoot,
+		merkleInput:       merkleInput,
+		proofRoot:         proofRoot,
+		proofRootHash:     proofRoot.Hash(),
+		singleProof:       singleProof,
+		multiProof:        multiProof,
+		adjacentProof:     adjacentProof,
+		fullTreeLeafProof: fullTreeLeafProof,
+	}
+}
+
+func BenchmarkNodeProve(b *testing.B) {
+	f := newBenchFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := f.proofRoot.Prove(f.singleProof.Index); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkNodeProveMulti(b *testing.B) {
 	f := newBenchFixture(b)
 	b.ReportAllocs()
