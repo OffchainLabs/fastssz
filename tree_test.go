@@ -209,3 +209,12 @@ func TestTreeInternalsUseGenericUintHelpers(t *testing.T) {
 	}
 	t.Fatal("did not find TreeFromNodesWithMixin")
 }
+
+func BenchmarkNodeHash(b *testing.B) {
+	f := newBenchFixture(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = f.treeRoot.Hash()
+	}
+}

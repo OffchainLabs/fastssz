@@ -168,3 +168,17 @@ func TestAppendUintUsesMarshalUintInternally(t *testing.T) {
 	}
 	t.Fatal("did not find AppendUint")
 }
+
+func BenchmarkHasherMerkleize(b *testing.B) {
+	f := newBenchFixture(b)
+	hasher := NewHasher()
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(f.merkleInput)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		hasher.Reset()
+		hasher.Append(f.merkleInput)
+		hasher.Merkleize(0)
+	}
+}
