@@ -13,8 +13,8 @@ import (
 	"testing"
 
 	"github.com/golang/snappy"
-	ssz "github.com/prysmaticlabs/fastssz"
-	"github.com/prysmaticlabs/fastssz/fuzz"
+	ssz "github.com/OffchainLabs/fastssz"
+	"github.com/OffchainLabs/fastssz/fuzz"
 
 	"gopkg.in/yaml.v2"
 )
